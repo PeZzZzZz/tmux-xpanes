@@ -3446,6 +3446,8 @@ test_ss_and_t_option() {
     }
 }
 
+## TODO: New tests for -f option
+
 ###:-:-:END_TESTING:-:-:###
 
 ###:-:-:INSERT_TESTING:-:-:###
