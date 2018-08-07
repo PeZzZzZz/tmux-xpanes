@@ -73,7 +73,7 @@ readonly XP_AWAIT_CMD=$'\n'${XP_SHELL}$' -c \'printf "%s " "Pane is dead: Press 
 # Check dependencies just in case.
 # Even POSIX compliant commands are only used in this program.
 # `xargs`, `sleep`, `mkfifo` are omitted because minimum functions can work without them.
-readonly XP_DEPENDENCIES="${XP_DEPENDENCIES:-tmux grep sed tr od echo touch printf cat sort pwd cd}"
+readonly XP_DEPENDENCIES="${XP_DEPENDENCIES:-tmux grep sed tr od echo touch printf cat sort pwd cd mkfifo}"
 
 ## --------------------------------
 # User customizable shell variables
@@ -544,6 +544,14 @@ xpns_notify() {
   _fifo="${XP_CACHE_HOME}/__xpns_${_wait_id}"
   xpns_msg_debug "xpns_notify:Notify to $_fifo"
   printf "%s\\n" 1 > "$_fifo" &
+}
+
+xpns_delete_notify() {
+  local _wait_id="$1" ; shift
+  local _fifo
+  _fifo="${XP_CACHE_HOME}/__xpns_${_wait_id}"
+  xpns_msg_debug "xpns_delete_notify:Delete $_fifo"
+  rm -f "$_fifo"
 }
 
 xpns_notify_logging() {
@@ -1346,12 +1354,6 @@ xpns_pre_execution() {
     exit ${XP_EINVAL}
   fi
 
-  # Create new session.
-  ${TMUX_XPANES_EXEC} -S "${XP_SOCKET_PATH}" new-session -s "${XP_SESSION_NAME}" -n "${XP_TMP_WIN_NAME}" -d
-  local _def_allow_rename=
-  _def_allow_rename="$(xpns_get_global_tmux_conf 'allow-rename' "${XP_SOCKET_PATH}")"
-  xpns_suppress_allow_rename "${_def_allow_rename-}" "${XP_SOCKET_PATH}"
-
   # Append -- flag.
   # Because any arguments may have `-`
   if [[ ${XP_NO_OPT} -eq 1 ]]; then
@@ -1364,11 +1366,19 @@ xpns_pre_execution() {
   fi
   _args4args=$(xpns_arr2args "${XP_ARGS[@]}")
 
-  ${TMUX_XPANES_EXEC} -S "${XP_SOCKET_PATH}" \
-    send-keys -t "${XP_SESSION_NAME}:${XP_TMP_WIN_NAME}" \
-    "${XP_ABS_THIS_FILE_NAME} ${_opts4args} ${_args4args}" C-m
-  ${TMUX_XPANES_EXEC} -S "${XP_SOCKET_PATH}" \
-    send-keys -t "${XP_SESSION_NAME}:${XP_TMP_WIN_NAME}" "exit" C-m
+  local wait_id="pre_execute-$$"
+
+  # Create new session.
+  ${TMUX_XPANES_EXEC} -S "${XP_SOCKET_PATH}" new-session -s "${XP_SESSION_NAME}" -n "${XP_TMP_WIN_NAME}" -d \
+    "$(xpns_wait_func "${wait_id}")"$'\n'"${XP_ABS_THIS_FILE_NAME} ${_opts4args} ${_args4args}"
+
+  # Suppress allow-rename for old tmux version
+  local _def_allow_rename=
+  _def_allow_rename="$(xpns_get_global_tmux_conf 'allow-rename' "${XP_SOCKET_PATH}")"
+  xpns_suppress_allow_rename "${_def_allow_rename-}" "${XP_SOCKET_PATH}"
+
+  xpns_notify "${wait_id}"
+  xpns_delete_notify "${wait_id}"
 
   # Avoid attaching (for unit testing).
   if [[ ${XP_OPT_ATTACH} -eq 1 ]]; then
