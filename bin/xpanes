@@ -5,7 +5,7 @@ readonly XP_SHELL="/bin/bash"
 # @Filename xpanes
 
 set -u
-readonly XP_VERSION="3.1.0"
+readonly XP_VERSION="3.2.0-beta"
 trap 'rm -f "${XP_CACHE_HOME}"/__xpns_*$$' EXIT
 
 ## --------------------------------
@@ -22,6 +22,9 @@ readonly XP_ETTY=5
 
 # Invalid layout.
 readonly XP_ELAYOUT=6
+
+# Syntax error of DLS
+readonly XP_ESYNTAX=7
 
 # Log related exit status is 2x.
 ## Could not create a directory.
@@ -89,7 +92,7 @@ TMUX_XPANES_LOG_DIRECTORY="${TMUX_XPANES_LOG_DIRECTORY:-${XP_DEFAULT_TMUX_XPANES
 # options which work individually.
 readonly XP_FLAG_OPTIONS="[hVdetxs]"
 # options which need arguments.
-readonly XP_ARG_OPTIONS="[IScln]"
+readonly XP_ARG_OPTIONS="[ISclnf]"
 readonly XP_DEFAULT_LAYOUT="tiled"
 readonly XP_DEFAULT_REPSTR="{}"
 readonly XP_DEFAULT_CMD_UTILITY="echo {} "
@@ -114,7 +117,8 @@ XP_OPT_CHANGE_BORDER=0
 XP_OPT_EXTRA=0
 XP_OPT_SPEEDY=0
 XP_OPT_SPEEDY_AWAIT=0
-XP_OPT_DEBUG=0
+XP_OPT_DEBUG="${XP_OPT_DEBUG:-0}"
+XP_FOCUS_PANE_DSL="${XP_FOCUS_PANE_DSL:-}"
 
 ## --------------------------------
 # Logger
@@ -166,6 +170,7 @@ OPTIONS:
   -c <utility>                 Specify <utility> which is executed as a command in each panes. If <utility> is omitted, echo(1) is used.
   -d,--desync                  Make synchronize-panes option off on new window.
   -e                           Execute given arguments as is.
+  -f <EXPRESSION>              Specify selected pane by default.
   -I <repstr>                  Replacing one or more occurrences of <repstr> in <utility> given by -c option. Default value of <repstr> is {}.
   -l <layout>                  Specify a layout for a window. Recognized layout arguments are:
                                t    tiled (default)
@@ -180,7 +185,7 @@ OPTIONS:
   -t                           Display each argument on the each pane's border as their title.
   -x                           Create extra panes in the current active window.
   --log[=<directory>]          Enable logging and store log files to ~/.cache/xpanes/logs or given <directory>.
-  --log-format=<FORMAT>        File name of log files follows given <FORMAT>.
+  --log-format=<FORMAT>        File name of log files follow given <FORMAT>.
   --ssh                        Same as \`-t -s -c 'ssh -o StrictHostKeyChecking=no {}'\`.
   --stay                       Do not switch to new window.
   --debug                      Print debug message.
@@ -190,6 +195,22 @@ _EOS_
 
 xpns_usage_verbose() {
   cat << _EOS_
+EXPRESSION:
+    * Integer numbers.
+    * \`-\` and \`+\` operators
+    * Special variables
+      FP (First pane), LP (Last pane), BP (Biggest pane), SP (Smallest pane)
+
+    Example:
+      Biggest pane is selected.
+      $ xpanes -f BP A B C
+
+      Third pane is selected (if index pane-base-index is 0).
+      $ xpanes -f 2 A B C
+
+      Select the third pane from the last pane.
+      $ xpanes -f 'LP-2' A B C
+
 FORMAT:
     Default value is "${XP_DEFAULT_TMUX_XPANES_LOG_FORMAT}"
     Interpreted sequences are:
@@ -845,6 +866,476 @@ xpns_set_args_per_pane() {
   XP_ARGS=("${_filtered_args[@]}")
 }
 
+## ----------------
+# Arrange options for pipe mode
+#  * argument -> command utility
+#  * stdin -> argument
+## ----------------
+xpns_switch_pipe_mode() {
+  local _pane_num4new_term=""
+  if [[ ! -z "${XP_ARGS[*]-}" ]] && [[ ! -z "${XP_CMD_UTILITY-}" ]]; then
+    xpns_msg_error "Both arguments and other options (like '-c', '-e') which updates <utility> are given."
+    exit ${XP_EINVAL}
+  fi
+
+  if [[ -z "${TMUX-}" ]]; then
+    xpns_msg_warning "Attached session is required for 'Pipe mode'."
+    # This condition is used when the following situations.
+    #   * Enter from outside of tmux session(Normal mode1)
+    #   * Pipe mode.
+    #   * -n option.
+    #
+    # For example:
+    #     (Normal mode1)$ echo {a..g} | ./xpanes -n 2
+    # => This will once create the new window like this.
+    #     (inside of tmux session)$ ./xpanes '-n' '2' 'a' 'b' 'c' 'd' 'e' 'f' 'g'
+    #     => After the window is closed, following panes would be left.
+    #     (pane 1)$ echo a b
+    #     (pane 2)$ echo c d
+    #     (pane 3)$ echo e f
+    #     (pane 4)$ echo g
+    # In order to create such the query,
+    # separate all the argument into minimum tokens
+    # with xargs -n 1
+    if [[ -n "${XP_MAX_PANE_ARGS-}" ]]; then
+      _pane_num4new_term=1
+    fi
+  fi
+
+  while read -r line;
+  do
+    XP_STDIN+=("${line}")
+  done < <(cat | xpns_rm_empty_line | \
+    xpns_pipe_filter "${_pane_num4new_term:-${XP_MAX_PANE_ARGS}}")
+
+
+  # Merge them into utility.
+  if [[ ! -z "${XP_ARGS[*]-}" ]]; then
+    # Attention: It might be wrong result if IFS is changed.
+    XP_CMD_UTILITY="${XP_ARGS[*]}"
+  fi
+
+  # If there is empty -I option or user does not assign the <repstr>,
+  # Append the space and <repstr> at the end of the <utility>
+  # This is same as the xargs command of GNU.
+  # i.e,
+  #   $ echo 10 | xargs seq
+  #     => seq 10
+  # Whith is same as
+  #   $ echo 10 | xargs -I@ seq @
+  #     => seq 10
+  if [[ -z "${XP_REPSTR}" ]]; then
+    XP_REPSTR="${XP_DEFAULT_REPSTR}"
+    if [[ ! -z "${XP_ARGS[*]-}" ]]; then
+      XP_CMD_UTILITY="${XP_ARGS[*]-} ${XP_REPSTR}"
+    fi
+  fi
+
+  # Deal with stdin as arguments.
+  XP_ARGS=("${XP_STDIN[@]-}")
+}
+
+xpns_layout_short2long() {
+  sed \
+    -e 's/^t$/tiled/' \
+    -e 's/^eh$/even-horizontal/' \
+    -e 's/^ev$/even-vertical/' \
+    -e 's/^mh$/main-horizontal/' \
+    -e 's/^mv$/main-vertical/' \
+    -e ';'
+}
+
+xpns_is_valid_layout() {
+  local _layout="${1-}"
+  local _pat='^(tiled|even-horizontal|even-vertical|main-horizontal|main-vertical)$'
+  if ! [[ $_layout =~ $_pat ]]  ; then
+    xpns_msg_error "Invalid layout '${_layout}'."
+    exit ${XP_ELAYOUT}
+  fi
+}
+
+xpns_DSL_biggest_pane () {
+  local idx
+  local max=0
+  while read -r _idx _height _width; do
+    _size=$(( _height * _width ))
+    if (( _size > max )) ;then
+      idx="$_idx"
+      max="$_size"
+    fi
+  done
+  printf "%s\\n" "$idx"
+}
+
+xpns_DSL_smallest_pane () {
+  local idx
+  local min=0
+  while read -r _idx _height _width; do
+    _size=$(( _height * _width ))
+    # Initialize min
+    if (( min == 0 )) || (( _size < min )) ;then
+      idx="$_idx"
+      min="$_size"
+    fi
+  done
+  printf "%s\\n" "$idx"
+}
+
+xpns_DSL_syntax_check () {
+  local _dsl="$1"
+  local _pat='^([\+-]| |LP|FP|BP|SP|[0-9])+$'
+  if ! [[ $_dsl =~ $_pat ]]; then
+    xpns_msg_error "-f option syntax error '$_dsl'"
+    return 1
+  fi
+  xpns_msg_debug "xpns_DSL_syntax_check: syntax check succeeded"
+  return 0
+}
+
+xpns_DSL_result_check () {
+  local _result="$1"
+  local _pat='^[0-9]+$'
+  if ! [[ $_result =~ $_pat ]]; then
+    return 1
+  fi
+  return 0
+}
+
+xpns_DSL_execute () {
+  local _dsl="$1"
+  local _res
+  local _panes
+  local LP FP BP SP
+
+  # syntax check is already implementd in the xpns_load_arg_options
+  # Skip xpns_DSL_syntax_check
+
+  _panes="$(${TMUX_XPANES_EXEC} list-panes -F '#{pane_index} #{pane_height} #{pane_width}')"
+  xpns_msg_debug "xpns_DSL_execute: list-panes: $( echo "${_panes}" | tr '\n' '/' )"
+  # shellcheck disable=SC2034
+  FP="$(echo "$_panes" | { read -r _idx _ _; echo "${_idx}"; } )"
+  xpns_msg_debug "xpns_DSL_execute: FP = $FP"
+  # shellcheck disable=SC2034
+  LP="$(echo "$_panes" | tail -n 1 | { read -r _idx _ _; echo "${_idx}"; } )"
+  xpns_msg_debug "xpns_DSL_execute: LP = $LP"
+  # shellcheck disable=SC2034
+  BP="$(echo "$_panes" | xpns_DSL_biggest_pane)"
+  xpns_msg_debug "xpns_DSL_execute: BP = $BP"
+  # shellcheck disable=SC2034
+  SP="$(echo "$_panes" | xpns_DSL_smallest_pane)"
+  xpns_msg_debug "xpns_DSL_execute: SP = $SP"
+  # execute formula
+  _res=$(( _dsl ))
+  xpns_msg_debug "xpns_DSL_execute: execute [$_dsl]: result [$_res]"
+  if ! xpns_DSL_result_check "$_res" ;then
+    xpns_msg_warning "Given DSL [$_dsl] returns invalid result [$_res]"
+    return 2
+  fi
+  printf "%s\\n" "$_res"
+  return 0
+}
+
+xpns_warning_before_extra() {
+  local _ans _synchronized
+  _synchronized="$(xpns_get_local_tmux_conf "synchronize-panes")"
+  if [[ "on" == "${_synchronized}" ]];then
+    xpns_msg_warning "Panes are now synchronized.
+'-x' option may cause unexpected behavior on the synchronized panes."
+    printf "Are you really sure? [y/n]: "
+    read -r _ans
+    if ! [[ "${_ans-}" =~ ^[yY]  ]]; then
+      return 1
+    fi
+  fi
+}
+
+xpns_load_flag_options() {
+  if [[ "$1" =~ h ]]; then
+    xpns_usage
+    xpns_usage_verbose
+    exit 0
+  fi
+  if [[ "$1" =~ V ]]; then
+    xpns_version
+    exit 0
+  fi
+  if [[ "$1" =~ x ]]; then
+    XP_OPT_EXTRA=1
+    if ! xpns_warning_before_extra; then
+      exit ${XP_EINTENT}
+    fi
+  fi
+  if [[ "$1" =~ d ]]; then
+    XP_OPT_IS_SYNC=0
+  fi
+  if [[ "$1" =~ e ]]; then
+    XP_REPSTR="{}"
+    XP_CMD_UTILITY="{}"
+  fi
+  if [[ "$1" =~ t ]]; then
+    if ( xpns_tmux_is_greater_equals 2.3 ) ; then
+      XP_OPT_SET_TITLE=1
+      XP_OPT_CHANGE_BORDER=1
+    else
+      xpns_msg_warning "-t option cannot be used by tmux version less than 2.3. Disabled."
+      sleep 1
+    fi
+  fi
+  if [[ "$1" =~ s ]]; then
+    XP_OPT_SPEEDY=1
+    XP_OPT_SPEEDY_AWAIT=1
+  fi
+  if [[ "$1" =~ ss ]]; then
+    XP_OPT_SPEEDY_AWAIT=0
+  fi
+  return 1
+}
+
+xpns_load_arg_options() {
+  # Extract flag options only.
+  local _pattern
+  xpns_load_flag_options "$(xpns_extract_matched "$1" "^-${XP_FLAG_OPTIONS}+")" > /dev/null
+  if [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*I ]]; then
+    # Behavior like this.
+    # -IAAA       -- XP_REPSTR="AAA"
+    # -I AAA BBB  -- XP_REPSTR="AAA", XP_ARGS=("BBB")
+    # -I"AAA BBB" -- XP_REPSTR="AAA BBB"
+    # -IAAA BBB   -- XP_REPSTR="AAA", XP_ARGS=("BBB")
+    # -I -d ...   -- XP_REPSTR=""
+    _pattern="^-${XP_FLAG_OPTIONS}*I(.+)"
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_REPSTR="${BASH_REMATCH[1]}"
+      return 0
+    elif ! [[ "$2" =~ ^-.* ]]; then
+      XP_REPSTR="$2"
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -I option"
+      exit ${XP_EINVAL}
+    fi
+  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*l ]]; then
+    _pattern="^-${XP_FLAG_OPTIONS}*l(.+)"
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_LAYOUT="$(cat <<<"${BASH_REMATCH[1]}" | xpns_layout_short2long)"
+      xpns_is_valid_layout "${XP_LAYOUT}"
+      return 0
+    elif ! [[ "$2" =~ ^-.* ]]; then
+      XP_LAYOUT="$(cat <<<"$2" |  xpns_layout_short2long )"
+      xpns_is_valid_layout "${XP_LAYOUT}"
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -l option"
+      exit ${XP_EINVAL}
+    fi
+  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*c ]]; then
+    _pattern="^-${XP_FLAG_OPTIONS}*c(.+)"
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_CMD_UTILITY="${BASH_REMATCH[1]}"
+      XP_OPT_CMD_UTILITY=1
+      return 0
+    elif ! [[ "$2" =~ ^-.* ]]; then
+      XP_CMD_UTILITY="$2"
+      XP_OPT_CMD_UTILITY=1
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -c option"
+      exit ${XP_EINVAL}
+    fi
+  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*n ]]; then
+    _pattern="^-${XP_FLAG_OPTIONS}*n([0-9]+)"
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_MAX_PANE_ARGS="${BASH_REMATCH[1]}"
+      return 0
+    elif [[ "$2" =~ ^[0-9]+$ ]]; then
+      XP_MAX_PANE_ARGS="$2"
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -n option"
+      exit ${XP_EINVAL}
+    fi
+  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*S ]]; then
+    _pattern="^-${XP_FLAG_OPTIONS}*S(.+)"
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_SOCKET_PATH="${BASH_REMATCH[1]}"
+      return 0
+    elif ! [[ "$2" =~ ^-.* ]]; then
+      XP_SOCKET_PATH="$2"
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -S option"
+      exit ${XP_EINVAL}
+    fi
+  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*f ]]; then
+    _pattern="^-${XP_FLAG_OPTIONS}*f(.+)"
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_FOCUS_PANE_DSL="${BASH_REMATCH[1]}"
+      if ! xpns_DSL_syntax_check "$XP_FOCUS_PANE_DSL";then
+        exit ${XP_ESYNTAX}
+      fi
+      return 0
+    elif ! [[ "$2" =~ ^-.* ]];then
+      XP_FOCUS_PANE_DSL="$2"
+      if ! xpns_DSL_syntax_check "$XP_FOCUS_PANE_DSL";then
+        exit ${XP_ESYNTAX}
+      fi
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -f option"
+      exit ${XP_EINVAL}
+    fi
+  fi
+  return 0
+}
+
+xpns_load_long_options() {
+  if [[ "$1" =~ ^--help$ ]]; then
+    xpns_usage
+    xpns_usage_verbose
+    exit 0
+  elif [[ "$1" =~ ^--version$ ]]; then
+    xpns_version
+    exit 0
+  elif [[ "$1" =~ ^--desync$ ]]; then
+    XP_OPT_IS_SYNC=0
+    return 1
+  elif [[ "$1" =~ ^--log-format=.*$ ]]; then
+    XP_OPT_LOG_STORE=1
+    TMUX_XPANES_LOG_FORMAT="${1#--log-format=}"
+    return 1
+  elif [[ "$1" =~ ^--log ]]; then
+    XP_OPT_LOG_STORE=1
+    if [[ "$1" =~ ^--log=.*$  ]]; then
+      TMUX_XPANES_LOG_DIRECTORY="${1#--log=}"
+    fi
+    return 1
+  elif [[ "$1" =~ ^--ssh$ ]]; then
+    XP_CMD_UTILITY="${XP_SSH_CMD_UTILITY}"
+    # Enable -t option as well
+    XP_OPT_SET_TITLE=1
+    XP_OPT_CHANGE_BORDER=1
+    # Enable -s option
+    XP_OPT_SPEEDY=1
+    XP_OPT_SPEEDY_AWAIT=1
+    return 1
+    # For unit testing
+  elif [[ "$1" =~ ^--dry-run$ ]]; then
+    XP_OPT_DRY_RUN=1
+    return 1
+  elif [[ "$1" =~ ^--stay$ ]]; then
+    XP_OPT_ATTACH=0
+    return 1
+  elif [[ "$1" =~ ^--debug$ ]]; then
+    XP_OPT_DEBUG=1
+    return 1
+
+  ## ----------------
+  # Other options
+  ## ----------------
+  else
+    xpns_msg_error "invalid option -- '${1#--}'"
+    xpns_usage
+    echo "Try '${XP_THIS_FILE_NAME} --help' for more information." >&2
+    exit ${XP_EINVAL}
+  fi
+}
+
+xpns_parse_options() {
+  while (( $# > 0 ))
+  do
+    case "$1" in
+      --)
+      if [[ ${XP_NO_OPT} -eq 1 ]]; then
+        XP_ARGS+=("$1")
+        shift
+      else
+        # Disable any more options
+        XP_NO_OPT=1
+        shift
+      fi
+      ;;
+      ## ----------------
+      # Long options
+      ## ----------------
+      --*)
+      if [[ ${XP_NO_OPT} -eq 1 ]]; then
+        XP_ARGS+=("$1")
+        shift
+      else
+        local _shift_count="0"
+        xpns_load_long_options "$@"
+        _shift_count="$?"
+        [[ "${_shift_count}" = "1" ]] && XP_OPTIONS+=("$1") && shift
+      fi
+      ;;
+      ## ----------------
+      # Short options
+      ## ----------------
+      -*)
+      if [[ ${XP_NO_OPT} -eq 1 ]]; then
+        XP_ARGS+=("$1")
+        shift
+      else
+        local _shift_count="0"
+        if [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*${XP_ARG_OPTIONS}. ]];then
+          xpns_load_arg_options "$@"
+          XP_OPTIONS+=("$1") && shift
+        elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*${XP_ARG_OPTIONS}$ ]] && [[ -n "${2-}" ]];then
+          xpns_load_arg_options "$@"
+          _shift_count="$?"
+          XP_OPTIONS+=("$1" "$2") && shift && shift
+        elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}+$  ]];then
+          xpns_load_flag_options "$1"
+          XP_OPTIONS+=("$1") && shift
+        ## ----------------
+        # Other options
+        ## ----------------
+        else
+          xpns_msg_error "Invalid option -- '${1#-}'"
+          xpns_usage
+          echo "Try '${XP_THIS_FILE_NAME} --help' for more information." >&2
+          exit ${XP_EINVAL}
+        fi
+      fi
+      ;;
+      ## ----------------
+      # Other arguments
+      ## ----------------
+      *)
+      XP_ARGS+=("$1")
+      XP_NO_OPT=1
+      shift
+      ;;
+    esac
+  done
+
+  # If there is any standard input from pipe,
+  # 1 line handled as 1 argument.
+  if [[ ! -t 0 ]]; then
+    XP_IS_PIPE_MODE=1
+    xpns_switch_pipe_mode
+  fi
+
+  # When no argument arr given, exit.
+  if [[ -z "${XP_ARGS[*]-}" ]]; then
+    xpns_msg_error "No arguments are given."
+    xpns_usage
+    echo "Try '${XP_THIS_FILE_NAME} --help' for more information." >&2
+    exit ${XP_EINVAL}
+  fi
+
+  # Set default value in case of empty.
+  XP_CMD_UTILITY="${XP_CMD_UTILITY:-${XP_DEFAULT_CMD_UTILITY}}"
+  XP_REPSTR="${XP_REPSTR:-${XP_DEFAULT_REPSTR}}"
+
+  # To set utility on pre_execution, set -c option manually.
+  if [[ ${XP_OPT_CMD_UTILITY} -eq 0 ]];then
+    XP_OPTIONS+=("-c" "${XP_CMD_UTILITY}")
+  fi
+
+  xpns_msg_debug "Options: $(xpns_arr2args "${XP_OPTIONS[@]}")"
+  xpns_msg_debug "Arguments: $(xpns_arr2args "${XP_ARGS[@]}")"
+}
+
 # Execute from Normal mode1
 xpns_pre_execution() {
   local _opts4args=""
@@ -1014,6 +1505,16 @@ xpns_execution() {
   xpns_msg_debug "xpns_is_window_alive:3: After setting title"
   xpns_is_window_alive "${_window_name}" "${XP_OPT_SPEEDY_AWAIT}" "${_def_allow_rename-}"
 
+  ## Select pane by -f option
+  if [[ -n "${XP_FOCUS_PANE_DSL}" ]]; then
+    local _dsl_result
+    if _dsl_result=$(xpns_DSL_execute "${XP_FOCUS_PANE_DSL}") ;then
+      ${TMUX_XPANES_EXEC} select-pane -t "${_window_name}.$_dsl_result"
+    else
+      xpns_msg_warning "-f option is ignored."
+    fi
+  fi
+
   # Sending operations for each pane.
   # With -s option, command is already sent.
   if [[ $XP_OPT_SPEEDY -eq 0 ]]; then
@@ -1060,377 +1561,6 @@ xpns_execution() {
   fi
 
   xpns_restore_allow_rename "${_def_allow_rename-}"
-}
-
-## ----------------
-# Arrange options for pipe mode
-#  * argument -> command utility
-#  * stdin -> argument
-## ----------------
-xpns_switch_pipe_mode() {
-  local _pane_num4new_term=""
-  if [[ ! -z "${XP_ARGS[*]-}" ]] && [[ ! -z "${XP_CMD_UTILITY-}" ]]; then
-    xpns_msg_error "Both arguments and other options (like '-c', '-e') which updates <utility> are given."
-    exit ${XP_EINVAL}
-  fi
-
-  if [[ -z "${TMUX-}" ]]; then
-    xpns_msg_warning "Attached session is required for 'Pipe mode'."
-    # This condition is used when the following situations.
-    #   * Enter from outside of tmux session(Normal mode1)
-    #   * Pipe mode.
-    #   * -n option.
-    #
-    # For example:
-    #     (Normal mode1)$ echo {a..g} | ./xpanes -n 2
-    # => This will once create the new window like this.
-    #     (inside of tmux session)$ ./xpanes '-n' '2' 'a' 'b' 'c' 'd' 'e' 'f' 'g'
-    #     => After the window is closed, following panes would be left.
-    #     (pane 1)$ echo a b
-    #     (pane 2)$ echo c d
-    #     (pane 3)$ echo e f
-    #     (pane 4)$ echo g
-    # In order to create such the query,
-    # separate all the argument into minimum tokens
-    # with xargs -n 1
-    if [[ -n "${XP_MAX_PANE_ARGS-}" ]]; then
-      _pane_num4new_term=1
-    fi
-  fi
-
-  while read -r line;
-  do
-    XP_STDIN+=("${line}")
-  done < <(cat | xpns_rm_empty_line | \
-    xpns_pipe_filter "${_pane_num4new_term:-${XP_MAX_PANE_ARGS}}")
-
-
-  # Merge them into utility.
-  if [[ ! -z "${XP_ARGS[*]-}" ]]; then
-    # Attention: It might be wrong result if IFS is changed.
-    XP_CMD_UTILITY="${XP_ARGS[*]}"
-  fi
-
-  # If there is empty -I option or user does not assign the <repstr>,
-  # Append the space and <repstr> at the end of the <utility>
-  # This is same as the xargs command of GNU.
-  # i.e,
-  #   $ echo 10 | xargs seq
-  #     => seq 10
-  # Whith is same as
-  #   $ echo 10 | xargs -I@ seq @
-  #     => seq 10
-  if [[ -z "${XP_REPSTR}" ]]; then
-    XP_REPSTR="${XP_DEFAULT_REPSTR}"
-    if [[ ! -z "${XP_ARGS[*]-}" ]]; then
-      XP_CMD_UTILITY="${XP_ARGS[*]-} ${XP_REPSTR}"
-    fi
-  fi
-
-  # Deal with stdin as arguments.
-  XP_ARGS=("${XP_STDIN[@]-}")
-}
-
-xpns_layout_short2long() {
-  sed \
-    -e 's/^t$/tiled/' \
-    -e 's/^eh$/even-horizontal/' \
-    -e 's/^ev$/even-vertical/' \
-    -e 's/^mh$/main-horizontal/' \
-    -e 's/^mv$/main-vertical/' \
-    -e ';'
-}
-
-xpns_is_valid_layout() {
-  local _layout="${1-}"
-  local _pat='^(tiled|even-horizontal|even-vertical|main-horizontal|main-vertical)$'
-  if ! [[ $_layout =~ $_pat ]]  ; then
-    xpns_msg_error "Invalid layout '${_layout}'."
-    exit ${XP_ELAYOUT}
-  fi
-}
-
-xpns_warning_before_extra() {
-  local _ans _synchronized
-  _synchronized="$(xpns_get_local_tmux_conf "synchronize-panes")"
-  if [[ "on" == "${_synchronized}" ]];then
-    xpns_msg_warning "Panes are now synchronized.
-'-x' option may cause unexpected behavior on the synchronized panes."
-    printf "Are you really sure? [y/n]: "
-    read -r _ans
-    if ! [[ "${_ans-}" =~ ^[yY]  ]]; then
-      return 1
-    fi
-  fi
-}
-
-xpns_load_flag_options() {
-  if [[ "$1" =~ h ]]; then
-    xpns_usage
-    xpns_usage_verbose
-    exit 0
-  fi
-  if [[ "$1" =~ V ]]; then
-    xpns_version
-    exit 0
-  fi
-  if [[ "$1" =~ x ]]; then
-    XP_OPT_EXTRA=1
-    if ! xpns_warning_before_extra; then
-      exit ${XP_EINTENT}
-    fi
-  fi
-  if [[ "$1" =~ d ]]; then
-    XP_OPT_IS_SYNC=0
-  fi
-  if [[ "$1" =~ e ]]; then
-    XP_REPSTR="{}"
-    XP_CMD_UTILITY="{}"
-  fi
-  if [[ "$1" =~ t ]]; then
-    if ( xpns_tmux_is_greater_equals 2.3 ) ; then
-      XP_OPT_SET_TITLE=1
-      XP_OPT_CHANGE_BORDER=1
-    else
-      xpns_msg_warning "-t option cannot be used by tmux version less than 2.3. Disabled."
-      sleep 1
-    fi
-  fi
-  if [[ "$1" =~ s ]]; then
-    XP_OPT_SPEEDY=1
-    XP_OPT_SPEEDY_AWAIT=1
-  fi
-  if [[ "$1" =~ ss ]]; then
-    XP_OPT_SPEEDY_AWAIT=0
-  fi
-  return 1
-}
-
-xpns_load_arg_options() {
-  # Extract flag options only.
-  local _pattern
-  xpns_load_flag_options "$(xpns_extract_matched "$1" "^-${XP_FLAG_OPTIONS}+")" > /dev/null
-  if [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*I ]]; then
-    # Behavior like this.
-    # -IAAA       -- XP_REPSTR="AAA"
-    # -I AAA BBB  -- XP_REPSTR="AAA", XP_ARGS=("BBB")
-    # -I"AAA BBB" -- XP_REPSTR="AAA BBB"
-    # -IAAA BBB   -- XP_REPSTR="AAA", XP_ARGS=("BBB")
-    # -I -d ...   -- XP_REPSTR=""
-    _pattern="^-${XP_FLAG_OPTIONS}*I(.+)"
-    if [[ "$1" =~ $_pattern ]]; then
-      XP_REPSTR="${BASH_REMATCH[1]}"
-      return 0
-    elif ! [[ "$2" =~ ^-.* ]]; then
-      XP_REPSTR="$2"
-      return 0
-    else
-      xpns_msg_error "invalid argument '$2' for -I option"
-      exit ${XP_EINVAL}
-    fi
-  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*l ]]; then
-    _pattern="^-${XP_FLAG_OPTIONS}*l(.+)"
-    if [[ "$1" =~ $_pattern ]]; then
-      XP_LAYOUT="$(cat <<<"${BASH_REMATCH[1]}" | xpns_layout_short2long)"
-      xpns_is_valid_layout "${XP_LAYOUT}"
-      return 0
-    elif ! [[ "$2" =~ ^-.* ]]; then
-      XP_LAYOUT="$(cat <<<"$2" |  xpns_layout_short2long )"
-      xpns_is_valid_layout "${XP_LAYOUT}"
-      return 0
-    else
-      xpns_msg_error "invalid argument '$2' for -l option"
-      exit ${XP_EINVAL}
-    fi
-  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*c ]]; then
-    _pattern="^-${XP_FLAG_OPTIONS}*c(.+)"
-    if [[ "$1" =~ $_pattern ]]; then
-      XP_CMD_UTILITY="${BASH_REMATCH[1]}"
-      XP_OPT_CMD_UTILITY=1
-      return 0
-    elif ! [[ "$2" =~ ^-.* ]]; then
-      XP_CMD_UTILITY="$2"
-      XP_OPT_CMD_UTILITY=1
-      return 0
-    else
-      xpns_msg_error "invalid argument '$2' for -c option"
-      exit ${XP_EINVAL}
-    fi
-  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*n ]]; then
-    _pattern="^-${XP_FLAG_OPTIONS}*n([0-9]+)"
-    if [[ "$1" =~ $_pattern ]]; then
-      XP_MAX_PANE_ARGS="${BASH_REMATCH[1]}"
-      return 0
-    elif [[ "$2" =~ ^[0-9]+$ ]]; then
-      XP_MAX_PANE_ARGS="$2"
-      return 0
-    else
-      xpns_msg_error "invalid argument '$2' for -n option"
-      exit ${XP_EINVAL}
-    fi
-  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*S ]]; then
-    _pattern="^-${XP_FLAG_OPTIONS}*S(.+)"
-    if [[ "$1" =~ $_pattern ]]; then
-      XP_SOCKET_PATH="${BASH_REMATCH[1]}"
-      return 0
-    elif ! [[ "$2" =~ ^-.* ]]; then
-      XP_SOCKET_PATH="$2"
-      return 0
-    else
-      xpns_msg_error "invalid argument '$2' for -S option"
-      exit ${XP_EINVAL}
-    fi
-  fi
-  return 0
-}
-
-xpns_load_long_options() {
-  if [[ "$1" =~ ^--help$ ]]; then
-    xpns_usage
-    xpns_usage_verbose
-    exit 0
-  elif [[ "$1" =~ ^--version$ ]]; then
-    xpns_version
-    exit 0
-  elif [[ "$1" =~ ^--desync$ ]]; then
-    XP_OPT_IS_SYNC=0
-    return 1
-  elif [[ "$1" =~ ^--log-format=.*$ ]]; then
-    XP_OPT_LOG_STORE=1
-    TMUX_XPANES_LOG_FORMAT="${1#--log-format=}"
-    return 1
-  elif [[ "$1" =~ ^--log ]]; then
-    XP_OPT_LOG_STORE=1
-    if [[ "$1" =~ ^--log=.*$  ]]; then
-      TMUX_XPANES_LOG_DIRECTORY="${1#--log=}"
-    fi
-    return 1
-  elif [[ "$1" =~ ^--ssh$ ]]; then
-    XP_CMD_UTILITY="${XP_SSH_CMD_UTILITY}"
-    # Enable -t option as well
-    XP_OPT_SET_TITLE=1
-    XP_OPT_CHANGE_BORDER=1
-    # Enable -s option
-    XP_OPT_SPEEDY=1
-    XP_OPT_SPEEDY_AWAIT=1
-    return 1
-    # For unit testing
-  elif [[ "$1" =~ ^--dry-run$ ]]; then
-    XP_OPT_DRY_RUN=1
-    return 1
-  elif [[ "$1" =~ ^--stay$ ]]; then
-    XP_OPT_ATTACH=0
-    return 1
-  elif [[ "$1" =~ ^--debug$ ]]; then
-    XP_OPT_DEBUG=1
-    return 1
-
-  ## ----------------
-  # Other options
-  ## ----------------
-  else
-    xpns_msg_error "invalid option -- '${1#--}'"
-    xpns_usage
-    echo "Try '${XP_THIS_FILE_NAME} --help' for more information." >&2
-    exit ${XP_EINVAL}
-  fi
-}
-
-xpns_parse_options() {
-  while (( $# > 0 ))
-  do
-    case "$1" in
-      --)
-      if [[ ${XP_NO_OPT} -eq 1 ]]; then
-        XP_ARGS+=("$1")
-        shift
-      else
-        # Disable any more options
-        XP_NO_OPT=1
-        shift
-      fi
-      ;;
-      ## ----------------
-      # Long options
-      ## ----------------
-      --*)
-      if [[ ${XP_NO_OPT} -eq 1 ]]; then
-        XP_ARGS+=("$1")
-        shift
-      else
-        local _shift_count="0"
-        xpns_load_long_options "$@"
-        _shift_count="$?"
-        [[ "${_shift_count}" = "1" ]] && XP_OPTIONS+=("$1") && shift
-      fi
-      ;;
-      ## ----------------
-      # Short options
-      ## ----------------
-      -*)
-      if [[ ${XP_NO_OPT} -eq 1 ]]; then
-        XP_ARGS+=("$1")
-        shift
-      else
-        local _shift_count="0"
-        if [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*${XP_ARG_OPTIONS}. ]];then
-          xpns_load_arg_options "$@"
-          XP_OPTIONS+=("$1") && shift
-        elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*${XP_ARG_OPTIONS}$ ]] && [[ -n "${2-}" ]];then
-          xpns_load_arg_options "$@"
-          _shift_count="$?"
-          XP_OPTIONS+=("$1" "$2") && shift && shift
-        elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}+$  ]];then
-          xpns_load_flag_options "$1"
-          XP_OPTIONS+=("$1") && shift
-        ## ----------------
-        # Other options
-        ## ----------------
-        else
-          xpns_msg_error "Invalid option -- '${1#-}'"
-          xpns_usage
-          echo "Try '${XP_THIS_FILE_NAME} --help' for more information." >&2
-          exit ${XP_EINVAL}
-        fi
-      fi
-      ;;
-      ## ----------------
-      # Other arguments
-      ## ----------------
-      *)
-      XP_ARGS+=("$1")
-      XP_NO_OPT=1
-      shift
-      ;;
-    esac
-  done
-
-  # If there is any standard input from pipe,
-  # 1 line handled as 1 argument.
-  if [[ ! -t 0 ]]; then
-    XP_IS_PIPE_MODE=1
-    xpns_switch_pipe_mode
-  fi
-
-  # When no argument arr given, exit.
-  if [[ -z "${XP_ARGS[*]-}" ]]; then
-    xpns_msg_error "No arguments are given."
-    xpns_usage
-    echo "Try '${XP_THIS_FILE_NAME} --help' for more information." >&2
-    exit ${XP_EINVAL}
-  fi
-
-  # Set default value in case of empty.
-  XP_CMD_UTILITY="${XP_CMD_UTILITY:-${XP_DEFAULT_CMD_UTILITY}}"
-  XP_REPSTR="${XP_REPSTR:-${XP_DEFAULT_REPSTR}}"
-
-  # To set utility on pre_execution, set -c option manually.
-  if [[ ${XP_OPT_CMD_UTILITY} -eq 0 ]];then
-    XP_OPTIONS+=("-c" "${XP_CMD_UTILITY}")
-  fi
-
-  xpns_msg_debug "Options: $(xpns_arr2args "${XP_OPTIONS[@]}")"
-  xpns_msg_debug "Arguments: $(xpns_arr2args "${XP_ARGS[@]}")"
 }
 
 ## --------------------------------
