@@ -119,6 +119,9 @@ XP_OPT_SPEEDY=0
 XP_OPT_SPEEDY_AWAIT=0
 XP_OPT_DEBUG="${XP_OPT_DEBUG:-0}"
 XP_FOCUS_PANE_DSL="${XP_FOCUS_PANE_DSL:-}"
+XP_OPT_SIZING=0
+XP_SIZING_COLS=
+XP_SIZING_ROWS=
 
 ## --------------------------------
 # Logger
@@ -138,6 +141,13 @@ xpns_msg() {
   printf "%s\\n" "${_msg}" >&2
 }
 
+xpns_msg_n() {
+  local _loglevel="$1"
+  local _msgbody="$2"
+  local _msg="${XP_THIS_FILE_NAME}:${_loglevel}: ${_msgbody}"
+  printf "%s" "${_msg}" >&2
+}
+
 xpns_msg_info() {
   xpns_msg "Info" "$1"
 }
@@ -151,6 +161,13 @@ xpns_msg_debug() {
     xpns_msg "Debug" "$(date "+[%F_%T]") $1"
   fi
 }
+
+xpns_msg_debug_n() {
+  if [[ $XP_OPT_DEBUG -eq 1 ]];then
+    xpns_msg_n "Debug" "$(date "+[%F_%T]") $1"
+  fi
+}
+
 
 xpns_msg_error() {
   xpns_msg "Error" "$1"
@@ -706,45 +723,74 @@ xpns_split_window() {
   local args=("$@")
   _last_idx=$(( ${#args[@]} - 1 ))
 
-  for i in $(xpns_seq $_last_idx 0)
-  do
-    xpns_msg_debug "Index:${i} Argument:${args[i]}"
-    _sep_count=$((_sep_count + 1))
-    _exec_cmd="${_cmd_template//${_repstr}/${args[i]}}"
+  # TODO: implement sizing feature
+  if [[ $XP_OPT_SIZING -eq 1 ]]; then
+    local row=$XP_SIZING_ROWS
+    local col=$XP_SIZING_COLS
+    local cell_width=$XP_CELL_WIDTH
+    local cell_height=$XP_CELL_HEIGHT
+    local rest_N=$XP_CELL_NUM
 
-    ## Speedy mode
-    if [[ $_cmd_exec_flag -eq 1 ]]; then
-
-      ## Speedy mode + logging
-      if [[ ${_log_flag} -eq 1 ]];then
-        # Wait for start of logging
-        # Without this part, logging thread may start after new process is finished.
-        # Execute function to wait for logging start.
-        _exec_cmd="$(xpns_wait_func "log_${_window_name}-${i}-$$")"$'\n'"${_exec_cmd}"
+    for (( i = 0 ; i < row ; i++ ));do
+      # Adjust cell width at the last row
+      if (( i == row - 1 )); then
+        cell_width=$(( XP_WINDOW_WIDTH / rest_N ))
       fi
+      # tmux split-window -v -l 30 -db -F '#{pane_id}' -P "echo 1; read"
+      pane_id=$(${TMUX_XPANES_EXEC} split-window -v -b -d -l "${cell_height}" -F '#{pane_id}' -P)
+      for (( j = 0 ; j < col ; j++ ));do
+        idx=$(( i * col + j ))
+        if (( idx < ${#args[@]} )); then
+          # tmux split-window -t '%85' -h -l $((152 - 60)) -d -F '#{pane_id}' -P "echo 2; read"
+          pane_id=$(${TMUX_XPANES_EXEC} split-window -t "${pane_id}" -h -d -l $(( XP_WINDOW_WIDTH - cell_width * ( j + 1 ) )) -F '#{pane_id}' -P)
+          xpns_msg_debug_n "[ $i * $j = ${args[idx]} ${cell_height}x${cell_width}] "
+          (( rest_N = rest_N - 1 ))
+        fi
+      done
+      xpns_msg_debug "\\n"
+    done
 
-      ## Speedy mode + pane title
-      if [[ ${_title_flag} -eq 1 ]];then
-        _exec_cmd="$(xpns_wait_func "title_${_window_name}-${i}-$$")"$'\n'${_exec_cmd}
+  else
+
+    for i in $(xpns_seq $_last_idx 0) ;do
+      xpns_msg_debug "Index:${i} Argument:${args[i]}"
+      _sep_count=$((_sep_count + 1))
+      _exec_cmd="${_cmd_template//${_repstr}/${args[i]}}"
+
+      ## Speedy mode
+      if [[ $_cmd_exec_flag -eq 1 ]]; then
+
+        ## Speedy mode + logging
+        if [[ ${_log_flag} -eq 1 ]];then
+          # Wait for start of logging
+          # Without this part, logging thread may start after new process is finished.
+          # Execute function to wait for logging start.
+          _exec_cmd="$(xpns_wait_func "log_${_window_name}-${i}-$$")"$'\n'"${_exec_cmd}"
+        fi
+
+        ## Speedy mode + pane title
+        if [[ ${_title_flag} -eq 1 ]];then
+          _exec_cmd="$(xpns_wait_func "title_${_window_name}-${i}-$$")"$'\n'${_exec_cmd}
+        fi
+
+        ## -ss: Speedy mode + nowait
+        if [[ $_await_flag -eq 1 ]]; then
+          _exec_cmd="${_exec_cmd}${XP_AWAIT_CMD}"
+        fi
+
+        # Execute command as a child process of default-shell.
+        ${TMUX_XPANES_EXEC} split-window -t "${_window_name}" -h -d "${_exec_cmd}"
+      else
+        # Open login shell and execute command on the interactive screen.
+        ${TMUX_XPANES_EXEC} split-window -t "${_window_name}" -h -d
       fi
-
-      ## -ss: Speedy mode + nowait
-      if [[ $_await_flag -eq 1 ]]; then
-        _exec_cmd="${_exec_cmd}${XP_AWAIT_CMD}"
+      # Restraining that size of pane's width becomes
+      # less than the minimum size which is defined by tmux.
+      if [[ ${_sep_count} -gt 2 ]] && [[ $XP_OPT_SIZING -eq 0 ]]; then
+        ${TMUX_XPANES_EXEC} select-layout -t "${_window_name}" tiled
       fi
-
-      # Execute command as a child process of default-shell.
-      ${TMUX_XPANES_EXEC} split-window -t "${_window_name}" -h -d "${_exec_cmd}"
-    else
-      # Open login shell and execute command on the interactive screen.
-      ${TMUX_XPANES_EXEC} split-window -t "${_window_name}" -h -d
-    fi
-    # Restraining that size of pane's width becomes
-    # less than the minimum size which is defined by tmux.
-    if [[ ${_sep_count} -gt 2 ]]; then
-      ${TMUX_XPANES_EXEC} select-layout -t "${_window_name}" tiled
-    fi
-  done
+    done
+  fi
 }
 
 #
@@ -1057,6 +1103,38 @@ xpns_warning_before_extra() {
   fi
 }
 
+# Adjust size of columns and rows in accordance with given N
+# func <col> <row> <N>
+# i.e:
+#     func "" "" 20
+#       => returns 4 5
+#     func "6" 0 20
+#       => returns 6 4
+xpns_adjust_col_row() {
+  local col="${1:-0}" ;shift
+  local row="${1:-0}" ;shift
+  local N="$1"   ;shift
+  local fix_col
+  local fix_row
+  (( col != 0 )) && fix_col=1
+  (( row != 0 )) && fix_row=1
+
+  # If both valures are specified, col is used
+  if (( fix_col == 1 )) && (( fix_row == 1 ));then
+    row=0
+    fix_row=0
+  fi
+  ## xpns_msg_debug "xpns_adjust_col_row(given): col=$col row=$row fix_col=$fix_col fix_row=$fix_row"
+  while (( col * row < N )) ;do
+    (( fix_row != 1 )) && (( row = row + 1 ))
+    if (( col * row < N ));then
+      (( fix_col != 1 )) &&  (( col = col + 1 ))
+    fi
+  done
+  ## xpns_msg_debug "xpns_adjust_col_row(result): col=$col row=$row fix_col=$fix_col fix_row=$fix_row"
+  printf "%d %d\\n" "${col}" "${row}"
+}
+
 xpns_load_flag_options() {
   if [[ "$1" =~ h ]]; then
     xpns_usage
@@ -1206,6 +1284,22 @@ xpns_load_long_options() {
   elif [[ "$1" =~ ^--desync$ ]]; then
     XP_OPT_IS_SYNC=0
     return 1
+  elif [[ "$1" =~ ^--col=.*$ ]]; then
+    XP_OPT_SIZING=1
+    XP_SIZING_COLS="${1#--col=}"
+    if ! [[ "$XP_SIZING_COLS" =~ ^[0-9]+$ ]]; then
+      xpns_msg_error "invalid argument '$XP_SIZING_COLS' for --col option"
+      exit ${XP_EINVAL}
+    fi
+    return 1
+  elif [[ "$1" =~ ^--row=.*$ ]]; then
+    XP_OPT_SIZING=1
+    XP_SIZING_ROWS="${1#--row=}"
+    if ! [[ "$XP_SIZING_ROWS" =~ ^[0-9]+$ ]]; then
+      xpns_msg_error "invalid argument '$XP_SIZING_ROWS' for --row option"
+      exit ${XP_EINVAL}
+    fi
+    return 1
   elif [[ "$1" =~ ^--log-format=.*$ ]]; then
     XP_OPT_LOG_STORE=1
     TMUX_XPANES_LOG_FORMAT="${1#--log-format=}"
@@ -1340,6 +1434,20 @@ xpns_parse_options() {
     XP_OPTIONS+=("-c" "${XP_CMD_UTILITY}")
   fi
 
+  if [[ ${XP_OPT_SIZING} -eq 1 ]];then
+    # TODO: Declare following variables on the top of the file
+    read -r XP_SIZING_COLS XP_SIZING_ROWS    < <(xpns_adjust_col_row "${XP_SIZING_COLS-}" "${XP_SIZING_ROWS-}" "${#XP_ARGS[@]}")
+    read -r XP_WINDOW_WIDTH XP_WINDOW_HEIGHT < <(${TMUX_XPANES_EXEC} display-message -p '#{window_width} #{window_height}')
+    XP_CELL_HEIGHT=$(( XP_WINDOW_WIDTH / XP_SIZING_COLS ))
+    XP_CELL_WIDTH=$(( XP_WINDOW_HEIGHT / XP_SIZING_ROWS ))
+    XP_CELL_NUM="${#XP_ARGS[@]}"
+  fi
+
+  ## Showing basic information
+  xpns_msg_debug "Window: [ Height: $XP_WINDOW_WIDTH Width: $XP_WINDOW_WIDTH]"
+  xpns_msg_debug "Basic Pane size: [ Height: $XP_CELL_HEIGHT Width: $XP_CELL_WIDTH]"
+  xpns_msg_debug "# Of Panes: ${XP_CELL_NUM}"
+  xpns_msg_debug "    -- Cols: ${XP_SIZING_COLS} Rows: ${XP_SIZING_ROWS}"
   xpns_msg_debug "Options: $(xpns_arr2args "${XP_OPTIONS[@]}")"
   xpns_msg_debug "Arguments: $(xpns_arr2args "${XP_ARGS[@]}")"
 }
@@ -1539,9 +1647,11 @@ xpns_execution() {
   xpns_msg_debug "xpns_is_window_alive:4: After sending commands"
   xpns_is_window_alive "${_window_name}" "${XP_OPT_SPEEDY_AWAIT}" "${_def_allow_rename-}"
 
-  xpns_arrange_pane_location \
-    "${_window_name}" \
-    "${_last_args_idx}"
+  if [[ $XP_OPT_SIZING -eq 0 ]] ;then
+    xpns_arrange_pane_location \
+      "${_window_name}" \
+      "${_last_args_idx}"
+  fi
 
   # Enable broadcasting
   if [[ ${XP_OPT_IS_SYNC} -eq 1 ]] && [[ ${XP_OPT_EXTRA} -eq 0 ]]; then

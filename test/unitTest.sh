@@ -243,6 +243,24 @@ test_xpns_DSL_smallest_pane () {
   assertEquals "$expected" "$actual"
 }
 
+test_xpns_adjust_col_row () {
+  export XP_OPT_DEBUG=1
+  actual=$(xpns_adjust_col_row "" "" 20)
+  expected="4 5"
+  assertEquals "$expected" "$actual"
+
+  actual=$(xpns_adjust_col_row 6 0 20)
+  expected="6 4"
+  assertEquals "$expected" "$actual"
+
+  actual=$(xpns_adjust_col_row 5 5 20)
+  expected="5 4"
+  assertEquals "$expected" "$actual"
+
+  actual=$(xpns_adjust_col_row 2 0 20)
+  expected="2 10"
+  assertEquals "$expected" "$actual"
+}
 
 # shellcheck source=/dev/null
 . "${THIS_DIR}/shunit2/source/2.1/src/shunit2"
