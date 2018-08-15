@@ -864,6 +864,82 @@ xpns_extra_panes_to_window() {
     "$@"
 }
 
+xpns_prepare_sized_window () {
+  local _window_name="$1"     ; shift
+  local _pane_base_index="$1" ; shift
+  local _repstr="$1"          ; shift
+  local _cmd_template="$1"    ; shift
+  local args=("$@")
+  local window_height="$XP_WINDOW_HEIGHT"
+  local window_width="$XP_WINDOW_WIDTH"
+  local col="$XP_OPT_SIZING_COLS"
+  local row="$XP_OPT_SIZING_ROWS"
+  local cols=("${XP_COLS[@]}")
+  local cols_offset=("${XP_COLS_OFFSETS[@]}")
+  local pane_id first_pane_id window_id
+  local cell_height cell_width top_pane_height
+  local i j rest_row offset
+
+  cell_height=$(( ( window_height - row + 1 ) / row ))
+  xpns_msg_debug "Insert first element"
+  _exec_cmd="${_cmd_template//${_repstr}/${args[0]}}"
+  # TODO: attach_flag
+  window_id=$(tmux new-window -n "${_window_name}" -F '#{window_id}' -P "${_exec_cmd}")
+  first_pane_id=$(tmux display-message -t "$window_id" -p -F '#{pane_id}' | head -n 1)
+
+  for (( i = row - 1 ; i > 0 ; i-- ));do
+    col="${cols[i]}"
+    cell_width=$(( ( window_width - col + 1 ) / col ))
+    xpns_msg_debug "col=$col"
+    (( offset = cols_offset[i]  ))
+    for (( j = 0 ; j < col ; j++ ));do
+
+      if (( j == 0 )) ;then
+        (( idx = offset - col ))
+        # Create new row
+        xpns_msg_debug "create row"
+        # Insert first element of the row first
+        _exec_cmd="${_cmd_template//${_repstr}/${args[idx]}}"
+        pane_id=$(tmux split-window -t "$window_id" -v -d -l $cell_height -F '#{pane_id}' -P "${_exec_cmd}")
+        xpns_msg_debug "tmux split-window -t $window_id -v -d -l $cell_height -F '#{pane_id}' -P ${_exec_cmd}"
+      fi
+
+      # Separate row into columns
+      if (( j != 0 )) ;then
+        (( idx = offset - j ))
+        _exec_cmd="${_cmd_template//${_repstr}/${args[idx]}}"
+        xpns_msg_debug "Separate row into columns"
+        ## TODO: Adjust width also
+        current_pane_width=$(tmux display-message -t "$pane_id" -p '#{pane_width}' | head -n 1)
+        rest_col=$(( col - j + 1 ))
+        cell_width=$(( ( current_pane_width - rest_col + 1 ) / rest_col ))
+        tmux split-window -t "$pane_id" -h -d -l "$cell_width" "${_exec_cmd}"
+        xpns_msg_debug "tmux split-window -t $pane_id -h -d -l $cell_width ${_exec_cmd}"
+      fi
+    done
+
+    # Adjust height
+    top_pane_height=$(tmux display-message -t "$window_id" -p '#{pane_height}' | head -n 1)
+    rest_row=$(( i ))
+    xpns_msg_debug "top_pane_height=$top_pane_height rest_row=$rest_row"
+    cell_height=$(( ( top_pane_height - rest_row + 1 ) / rest_row ))
+  done
+
+  # Split top row into columns
+  col="${cols[0]}"
+  cell_width=$(( ( window_width - col + 1 ) / col ))
+  for (( j = 1 ; j < col ; j++ ));do
+    idx=$(( cols_offset[0] - j ))
+    # Adjust width
+    current_pane_width=$(tmux display-message -t "$first_pane_id" -p '#{pane_width}' | head -n 1)
+    rest_col=$(( col - j + 1 ))
+    cell_width=$(( ( current_pane_width - rest_col + 1 ) / rest_col ))
+    xpns_msg_debug "Split top row into columns"
+    _exec_cmd="${_cmd_template//${_repstr}/${args[idx]}}"
+    tmux split-window -t "$first_pane_id" -h -d -l "$cell_width" "${_exec_cmd}"
+  done
+}
+
 #
 # Split a new window which was created by tmux into multiple panes.
 # Usage:
@@ -1463,9 +1539,10 @@ xpns_parse_options() {
   ## Showing basic information
   xpns_msg_debug "Window: [ Height: $XP_WINDOW_HEIGHT Width: $XP_WINDOW_WIDTH]"
   xpns_msg_debug "# Of Panes: ${XP_CELL_NUM}"
-  xpns_msg_debug "          Row[0] --...--> Row[MAX]"
-  xpns_msg_debug "    Col[]: ${XP_COLS[*]}"
-  xpns_msg_debug " Offset[]: ${XP_COLS_OFFSETS[*]}"
+  xpns_msg_debug "         | Row[0] --...--> Row[MAX]"
+  xpns_msg_debug "    -----+------------------------..."
+  xpns_msg_debug "    Col[]| ${XP_COLS[*]}"
+  xpns_msg_debug "    -----+------------------------..."
   xpns_msg_debug "Options: $(xpns_arr2args "${XP_OPTIONS[@]}")"
   xpns_msg_debug "Arguments: $(xpns_arr2args "${XP_ARGS[@]}")"
 }
@@ -1574,17 +1651,27 @@ xpns_execution() {
       "${XP_CMD_UTILITY}" \
       "${XP_ARGS[@]}"
   else
-    xpns_prepare_window \
-      "${_window_name}" \
-      "${_pane_base_index}" \
-      "${XP_OPT_LOG_STORE}" \
-      "${XP_OPT_SET_TITLE}" \
-      "${XP_OPT_ATTACH}" \
-      "${XP_OPT_SPEEDY}" \
-      "${XP_OPT_SPEEDY_AWAIT}" \
-      "${XP_REPSTR}" \
-      "${XP_CMD_UTILITY}" \
-      "${XP_ARGS[@]}"
+    if [[ ${XP_OPT_SIZING} -eq 1 ]];then
+      xpns_prepare_sized_window \
+        "${_window_name}" \
+        "${_pane_base_index}" \
+        "${XP_REPSTR}" \
+        "${XP_CMD_UTILITY}" \
+        "${XP_ARGS[@]}"
+
+    else
+      xpns_prepare_window \
+        "${_window_name}" \
+        "${_pane_base_index}" \
+        "${XP_OPT_LOG_STORE}" \
+        "${XP_OPT_SET_TITLE}" \
+        "${XP_OPT_ATTACH}" \
+        "${XP_OPT_SPEEDY}" \
+        "${XP_OPT_SPEEDY_AWAIT}" \
+        "${XP_REPSTR}" \
+        "${XP_CMD_UTILITY}" \
+        "${XP_ARGS[@]}"
+    fi
   fi
 
   ## With -ss option, it is possible to close all the panes as of here.
@@ -1653,7 +1740,8 @@ xpns_execution() {
 
   # Sending operations for each pane.
   # With -s option, command is already sent.
-  if [[ $XP_OPT_SPEEDY -eq 0 ]]; then
+  # TODO: Sizing is temporary
+  if [[ $XP_OPT_SPEEDY -eq 0 ]] && [[ ${XP_OPT_SIZING} -eq 0 ]]; then
     xpns_send_commands \
       "${_window_name}" \
       "${_pane_base_index}" \
