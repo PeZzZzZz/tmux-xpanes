@@ -262,5 +262,24 @@ test_xpns_adjust_col_row () {
   assertEquals "$expected" "$actual"
 }
 
+test_xpns_ceiling () {
+  actual=$(xpns_ceiling 11 2)
+  expected="6"
+  assertEquals "$expected" "$actual"
+
+  actual=$(xpns_ceiling 100 10)
+  expected="10"
+  assertEquals "$expected" "$actual"
+}
+
+test_xpns_divide_equally () {
+  actual=$(xpns_divide_equally 10 3)
+  expected="4 3 3 "
+  assertEquals "$expected" "$actual"
+
+  actual=$(xpns_divide_equally 12 3)
+  expected="4 4 4 "
+  assertEquals "$expected" "$actual"
+}
 # shellcheck source=/dev/null
 . "${THIS_DIR}/shunit2/source/2.1/src/shunit2"
