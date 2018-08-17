@@ -863,6 +863,74 @@ xpns_extra_panes_to_window() {
     "$@"
 }
 
+xpns_new_window () {
+  local _window_name="$1" ; shift
+  local _log_flag="$1"    ; shift
+  local _title_flag="$1"  ; shift
+  local _attach_flg="$1"  ; shift
+  local _speedy_flg="$1"  ; shift
+  local _await_flg="$1"   ; shift
+  local _idx="$1"         ; shift
+  local _exec_cmd="$1"    ; shift
+  local window_id
+
+  if [[ "${_await_flg}" -eq 1 ]]; then
+    _exec_cmd="${_exec_cmd}${XP_AWAIT_CMD}"
+  fi
+  if [[ "${_log_flag}" -eq 1 ]] && [[ "${_speedy_flg}" -eq 1 ]]; then
+    _exec_cmd="$(xpns_wait_func "log_${_window_name}-${_idx}-$$")"$'\n'"${_exec_cmd}"
+  fi
+  if [[ "${_title_flag}" -eq 1 ]] && [[ "${_speedy_flg}" -eq 1 ]]; then
+    _exec_cmd="$(xpns_wait_func "title_${_window_name}-${_idx}-$$")"$'\n'${_exec_cmd}
+  fi
+
+  # Create new window.
+  if [[ "${_attach_flg}" -eq 1 ]]; then
+    if [[ "${_speedy_flg}" -eq 1 ]]; then
+      window_id=$(tmux new-window -n "${_window_name}" -F '#{window_id}' -P "${_exec_cmd}")
+    else
+      window_id=$(tmux new-window -n "${_window_name}" -F '#{window_id}' -P )
+    fi
+  else
+    # Keep background
+    if [[ "${_speedy_flg}" -eq 1 ]]; then
+      window_id=$(tmux new-window -n "${_window_name}" -F '#{window_id}' -P -d "${_exec_cmd}")
+    else
+      window_id=$(tmux new-window -n "${_window_name}" -F '#{window_id}' -P -d)
+    fi
+  fi
+  echo "${window_id}"
+}
+
+xpns_new_pane () {
+  local _window_id="$1"   ; shift
+  local _log_flag="$1"    ; shift
+  local _title_flag="$1"  ; shift
+  local _attach_flg="$1"  ; shift
+  local _speedy_flg="$1"  ; shift
+  local _await_flg="$1"   ; shift
+  local _idx="$1"         ; shift
+  local _exec_cmd="$1"    ; shift
+  local pane_id
+
+  if [[ "${_await_flg}" -eq 1 ]]; then
+    _exec_cmd="${_exec_cmd}${XP_AWAIT_CMD}"
+  fi
+  if [[ "${_log_flag}" -eq 1 ]] && [[ "${_speedy_flg}" -eq 1 ]]; then
+    _exec_cmd="$(xpns_wait_func "log_${_window_name}-${_idx}-$$")"$'\n'"${_exec_cmd}"
+  fi
+  if [[ "${_title_flag}" -eq 1 ]] && [[ "${_speedy_flg}" -eq 1 ]]; then
+    _exec_cmd="$(xpns_wait_func "title_${_window_name}-${_idx}-$$")"$'\n'${_exec_cmd}
+  fi
+
+  if [[ "${_speedy_flg}" -eq 1 ]]; then
+    pane_id="$(tmux split-window -t "$_window_id" -v -d -l "${cell_height}" -F '#{pane_id}' -P "${_exec_cmd}")"
+  else
+    pane_id="$(tmux split-window -t "$_window_id" -v -d -l "${cell_height}" -F '#{pane_id}' -P)"
+  fi
+  printf "%s\\n" "${pane_id}"
+}
+
 xpns_prepare_sized_window () {
   local _window_name="$1"     ; shift
   local _log_flag="$1"        ; shift
@@ -886,26 +954,7 @@ xpns_prepare_sized_window () {
 
   cell_height=$(( ( window_height - row + 1 ) / row ))
   xpns_msg_debug "Insert first element"
-  _exec_cmd="${_cmd_template//${_repstr}/${args[0]}}"
-  if [[ $_await_flg -eq 1 ]]; then
-    _exec_cmd="${_exec_cmd}${XP_AWAIT_CMD}"
-  fi
-
-  # Create new window.
-  if [[ "${_attach_flg}" -eq 1 ]]; then
-    if [[ "${_speedy_flg}" -eq 1 ]]; then
-      window_id=$(tmux new-window -n "${_window_name}" -F '#{window_id}' -P "${_exec_cmd}")
-    else
-      window_id=$(tmux new-window -n "${_window_name}" -F '#{window_id}' -P )
-    fi
-  else
-    # Keep background
-    if [[ "${_speedy_flg}" -eq 1 ]]; then
-      window_id=$(tmux new-window -n "${_window_name}" -d -F '#{window_id}' -P "${_exec_cmd}")
-    else
-      window_id=$(tmux new-window -n "${_window_name}" -d -F '#{window_id}' -P)
-    fi
-  fi
+  window_id=$(xpns_new_window "${_window_name}" "${_log_flag}" "${_title_flag}" "${_attach_flg}" "${_speedy_flg}" "${_await_flg}" 0 "${_cmd_template//${_repstr}/${args[0]}}")
   first_pane_id=$(tmux display-message -t "$window_id" -p -F '#{pane_id}' | head -n 1)
 
   for (( i = row - 1 ; i > 0 ; i-- ));do
@@ -920,16 +969,7 @@ xpns_prepare_sized_window () {
         # Create new row
         xpns_msg_debug "create row"
         # Insert first element of the row first
-        _exec_cmd="${_cmd_template//${_repstr}/${args[idx]}}"
-        if [[ $_await_flg -eq 1 ]]; then
-          _exec_cmd="${_exec_cmd}${XP_AWAIT_CMD}"
-        fi
-        if [[ "${_speedy_flg}" -eq 1 ]]; then
-          pane_id=$(tmux split-window -t "$window_id" -v -d -l $cell_height -F '#{pane_id}' -P "${_exec_cmd}")
-        else
-          pane_id=$(tmux split-window -t "$window_id" -v -d -l $cell_height -F '#{pane_id}' -P)
-        fi
-        xpns_msg_debug "tmux split-window -t $window_id -v -d -l $cell_height -F '#{pane_id}' -P ${_exec_cmd}"
+        pane_id=$(xpns_new_pane "${_window_name}" "${_log_flag}" "${_title_flag}" "${_attach_flg}" "${_speedy_flg}" "${_await_flg}" "${idx}" "${_cmd_template//${_repstr}/${args[idx]}}")
       fi
 
       # Separate row into columns
