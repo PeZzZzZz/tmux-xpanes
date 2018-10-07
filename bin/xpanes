@@ -92,7 +92,7 @@ TMUX_XPANES_LOG_DIRECTORY="${TMUX_XPANES_LOG_DIRECTORY:-${XP_DEFAULT_TMUX_XPANES
 # options which work individually.
 readonly XP_FLAG_OPTIONS="[hVdetxs]"
 # options which need arguments.
-readonly XP_ARG_OPTIONS="[ISclnf]"
+readonly XP_ARG_OPTIONS="[ISclnfCR]"
 readonly XP_DEFAULT_LAYOUT="tiled"
 readonly XP_DEFAULT_REPSTR="{}"
 readonly XP_DEFAULT_CMD_UTILITY="echo {} "
@@ -206,6 +206,9 @@ OPTIONS:
   -S <socket-path>             Specify a full alternative path to the server socket.
   -t                           Display each argument on the each pane's border as their title.
   -x                           Create extra panes in the current active window.
+  -C NUM,--col=NUM             Number of cols.
+  -R NUM,--row=NUM             Number of rows.
+  --cols=NUM1,NUM2,...         Number of cols.
   --log[=<directory>]          Enable logging and store log files to ~/.cache/xpanes/logs or given <directory>.
   --log-format=<FORMAT>        File name of log files follow given <FORMAT>.
   --ssh                        Same as \`-t -s -c 'ssh -o StrictHostKeyChecking=no {}'\`.
@@ -1452,6 +1455,32 @@ xpns_load_arg_options() {
       return 0
     else
       xpns_msg_error "invalid argument '$2' for -f option"
+      exit ${XP_EINVAL}
+    fi
+  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*C ]]; then
+    _pattern="^-${XP_FLAG_OPTIONS}*C(.+)"
+    XP_OPT_SIZING=1
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_OPT_SIZING_COLS="${BASH_REMATCH[1]}"
+      return 0
+    elif ! [[ "$2" =~ ^-.* ]];then
+      XP_OPT_SIZING_COLS="$2"
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -C option"
+      exit ${XP_EINVAL}
+    fi
+  elif [[ "$1" =~ ^-${XP_FLAG_OPTIONS}*R ]]; then
+    _pattern="^-${XP_FLAG_OPTIONS}*R(.+)"
+    XP_OPT_SIZING=1
+    if [[ "$1" =~ $_pattern ]]; then
+      XP_OPT_SIZING_ROWS="${BASH_REMATCH[1]}"
+      return 0
+    elif ! [[ "$2" =~ ^-.* ]];then
+      XP_OPT_SIZING_ROWS="$2"
+      return 0
+    else
+      xpns_msg_error "invalid argument '$2' for -R option"
       exit ${XP_EINVAL}
     fi
   fi
