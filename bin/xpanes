@@ -954,9 +954,18 @@ xpns_prepare_sized_window () {
 
   cell_height=$(( ( window_height - row + 1 ) / row ))
   xpns_msg_debug "Insert first element"
-  window_id=$(xpns_new_window "${_window_name}" "${_log_flag}" "${_title_flag}" "${_attach_flg}" "${_speedy_flg}" "${_await_flg}" 0 "${_cmd_template//${_repstr}/${args[0]}}")
+  window_id=$(xpns_new_window \
+    "${_window_name}" \
+    "${_log_flag}" \
+    "${_title_flag}" \
+    "${_attach_flg}" \
+    "${_speedy_flg}" \
+    "${_await_flg}" \
+    0 \
+    "${_cmd_template//${_repstr}/${args[0]}}")
   first_pane_id=$(tmux display-message -t "$window_id" -p -F '#{pane_id}' | head -n 1)
 
+  ## Start from last row
   for (( i = row - 1 ; i > 0 ; i-- ));do
     col="${cols[i]}"
     cell_width=$(( ( window_width - col + 1 ) / col ))
@@ -969,7 +978,15 @@ xpns_prepare_sized_window () {
         # Create new row
         xpns_msg_debug "create row"
         # Insert first element of the row first
-        pane_id=$(xpns_new_pane "${_window_name}" "${_log_flag}" "${_title_flag}" "${_attach_flg}" "${_speedy_flg}" "${_await_flg}" "${idx}" "${_cmd_template//${_repstr}/${args[idx]}}")
+        pane_id=$(xpns_new_pane \
+          "${_window_name}" \
+          "${_log_flag}" \
+          "${_title_flag}" \
+          "${_attach_flg}" \
+          "${_speedy_flg}" \
+          "${_await_flg}" \
+          "${idx}" \
+          "${_cmd_template//${_repstr}/${args[idx]}}")
       fi
 
       # Separate row into columns
@@ -999,7 +1016,7 @@ xpns_prepare_sized_window () {
     cell_height=$(( ( top_pane_height - rest_row + 1 ) / rest_row ))
   done
 
-  # Split top row into columns
+  # Split first row into columns
   col="${cols[0]}"
   cell_width=$(( ( window_width - col + 1 ) / col ))
   for (( j = 1 ; j < col ; j++ ));do
